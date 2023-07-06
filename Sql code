@@ -1,0 +1,315 @@
+Question 01: Sales Performance Trends
+A sales manager needs to understand the trends and identify any significant changes in sales performance by comparing quarter over quarter.
+
+-- Analyzing the quantity of orders in each year and month
+SELECT 
+     DATE(DATE_TRUNC('month', order_purchase_timestamp)) AS purchase_year, 
+     COUNT(*) AS orders
+FROM olist_orders
+GROUP BY 1
+ORDER BY 1 DESC
+
+--We do not have a fully olist_orders data from years 2016, 2017 and 2018. In that way, we filtered the dates from 2016-10-01 until 2018-09-01
+--As known that each order_id can contain multiple products, we used a CTE to aggregate at order_id level by total products, price and freight value
+WITH aggregate_order_items AS(
+
+SELECT 
+     order_id, 
+     SUM(order_item_id) AS items, 
+     COUNT(product_id) AS products,
+     SUM(price) AS price,
+     SUM(freight_value) AS freight_value,
+     SUM(price + freight_value) AS total_price
+FROM olist_order_items
+GROUP BY 1
+),
+
+quarterly_sales AS(
+ 
+SELECT 
+     DATE(DATE_TRUNC('quarter', o.order_purchase_timestamp)) AS year_quarter,
+     SUM(aoi.items) AS items,
+     SUM(aoi.total_price) AS total_price
+FROM olist_orders o 
+LEFT JOIN aggregate_order_items aoi ON o.order_id = aoi.order_id
+GROUP BY 1
+)
+
+SELECT 
+     year_quarter, 
+     total_price,
+     LAG(total_price) OVER( ORDER BY year_quarter) AS previous_quarterly_sales,
+     total_price / NULLIF(LAG(total_price) OVER( ORDER BY year_quarter),0) AS QoQ_pct -- handling division by zero using nullif
+FROM quarterly_sales 
+WHERE year_quarter>='2017-01-01' AND year_quarter <'2018-10-01' -- filtering only fully quarters for comparison
+ORDER BY 1
+The sales performance consistently grew during this period, except for 2018 Q3.
+
+
+question 01: query output
+Question 02: Pareto Analysis
+The stakeholders are interested in a Pareto analysis to determine which products contributed to 80% of the sales in the year 2017.
+
+WITH product_categories_english AS( --aggregating at product category level
+
+SELECT 
+   i.order_id,
+   i.product_id, 
+   t.product_category_name_english, 
+   SUM(i.price) AS price, 
+   SUM(i.freight_value) freight_value,
+   SUM(i.price + i.freight_value) AS total_price
+FROM olist_order_items i
+LEFT JOIN olist_products p ON i.product_id = p.product_id
+LEFT JOIN olist_product_category_name_translation t ON t.product_category_name = p.product_category_name
+GROUP BY 1,2,3
+),
+
+product_category_agg AS(
+ 
+ SELECT 
+  COALESCE(product_category, 'without_category') AS product_category, --handling missing value at product category level
+  ROUND( 100 *(total_price / SUM(total_price) OVER() ) ,3) AS total_sales_pct
+
+ FROM(
+       SELECT  
+         c.product_category_name_english AS product_category, 
+         SUM(c.total_price) AS total_price
+       FROM product_categories_english c
+       LEFT JOIN olist_orders o ON o.order_id = c.order_id
+       WHERE 
+        order_approved_at IS not NULL --filtering only both sent and approved orders for sales reporting
+        AND DATE(DATE_TRUNC('year', o.order_approved_at))='2017-01-01'
+       GROUP BY 1
+ ) sub
+ ORDER BY 2 DESC
+)
+
+--Performing SUM OVER to find out the accumulative percentage from each product category
+SELECT 
+    product_category,
+    SUM(total_sales_pct) OVER( ORDER BY total_sales_pct DESC) AS total_sales_running_sum
+FROM product_category_agg
+In 2017, 80% of the sales were driven by 16 categories, showed in the table below:
+
+
+question 02: query output
+Question 03: On-Time Delivery Percentage
+Which percentage of the orders were delivered on time?
+
+WITH delivery_time AS(
+
+SELECT 
+   order_id,
+   customer_id,
+   DATE_PART('day', order_approved_at - order_purchase_timestamp ) AS purchase_to_approval,
+   DATE_PART('day', order_delivered_carrier_date - order_approved_at) AS approval_to_carrier,
+   DATE_PART('day', order_delivered_customer_date - order_delivered_carrier_date) AS carrier_to_customer,
+   DATE_PART('day', order_delivered_customer_date - order_purchase_timestamp) AS total_lead_time,
+   CASE WHEN DATE(order_delivered_customer_date) <= DATE(order_estimated_delivery_date) THEN TRUE ELSE FALSE END AS delivered_on_time,
+   DATE_PART('day', order_delivered_customer_date - order_estimated_delivery_date) AS delivery_days_delta
+FROM olist_orders
+WHERE 
+   order_status = 'delivered'
+)
+
+SELECT 
+    delivered_on_time, 
+    COUNT(DISTINCT order_id) AS orders,
+    ROUND(AVG(delivery_days_delta)::NUMERIC,2) AS avg_delay
+FROM delivery_time
+GROUP BY 1 
+93% of the orders were delivered on time, delivering on average, 12.52 days in advance.
+
+
+question 03: query output
+Question 04: Order fulfillment efficiency
+Which is the average time in each state from purchasing to delivery?
+
+WITH delivery_time AS(
+
+SELECT 
+ order_id,
+ customer_id,
+ DATE_PART('day', order_approved_at - order_purchase_timestamp ) AS purchase_to_approval,
+ DATE_PART('day', order_delivered_carrier_date - order_approved_at) AS approval_to_carrier,
+ DATE_PART('day', order_delivered_customer_date - order_delivered_carrier_date) AS carrier_to_customer,
+ DATE_PART('day', order_delivered_customer_date - order_purchase_timestamp) AS total_lead_time,
+ CASE WHEN DATE(order_delivered_customer_date) <= DATE(order_estimated_delivery_date) THEN TRUE ELSE FALSE END AS delivered_on_time,
+ DATE_PART('day', order_estimated_delivery_date - order_delivered_customer_date) AS delivery_date_delta
+FROM olist_orders
+WHERE 
+ order_status = 'delivered'
+)
+
+SELECT 
+ ROUND(AVG(purchase_to_approval)::NUMERIC,2) AS purchase_to_approval_avg,
+ ROUND(AVG(approval_to_carrier) ::NUMERIC,2) AS approval_to_carrier_avg,
+ ROUND(AVG(carrier_to_customer) ::NUMERIC,2) AS carrier_to_customer_avg,
+ ROUND(AVG(total_lead_time)::NUMERIC,2) AS total_lead_time_avg,
+ ROUND(AVG(delivery_date_delta) ::NUMERIC,2)AS delivery_date_delta_avg
+FROM delivery_time
+In this period, we can notice the following average time by each stage:
+
+
+question 04: query output
+Question 05: Payment methods
+Which are the customers’ preferred payment methods?
+
+WITH orders_base AS(
+ 
+SELECT 
+     o.order_id, 
+     o.order_approved_at,
+     p.payment_type,
+     COUNT(i.order_id) AS orders,
+     SUM(i.price) price, 
+     SUM(i.freight_value) freight_value,
+     SUM(i.price + i.freight_value) AS total_price,
+     p.payment_value,
+     p.payment_installments
+FROM olist_orders o
+LEFT JOIN olist_order_items    i ON o.order_id = i.order_id
+LEFT JOIN olist_order_payments p ON o.order_id = p.order_id
+WHERE 
+     o.order_approved_at IS NOT NULL 
+     AND p.payment_type IS NOT NULL
+GROUP BY 1,2,3,8,9
+)
+
+SELECT 
+     payment_type, 
+     purchases, 
+     ROUND(purchases / SUM(purchases) OVER(),2) AS payment_type_pct
+FROM(
+     SELECT 
+      payment_type, 
+      COUNT(order_id) AS purchases
+     FROM orders_base
+     GROUP BY 1
+) sub
+ORDER BY 2 DESC
+The majority of payment types were made using Credit Cards and Boleto(Invoice).
+
+
+question 05: query output
+Question 06: Customers Location
+To enhance target marketing and logistics planning, the operations teams needs to understand where the main customers are located.
+
+WITH orders_prices AS(
+
+ SELECT 
+      i.order_id,
+      SUM(i.price) AS price, 
+      SUM(i.freight_value) freight_value,
+      SUM(i.price + i.freight_value) AS total_price
+ FROM olist_order_items i
+ GROUP BY 1
+),
+
+customers_agg AS(
+
+ SELECT  
+      c.customer_state, 
+      COUNT(DISTINCT o.customer_id) AS unique_customers,
+      SUM(op.total_price) AS total_price
+ FROM olist_orders o 
+ LEFT JOIN olist_customers c ON o.customer_id = c.customer_id
+ LEFT JOIN orders_prices op ON o.order_id = op.order_id
+ WHERE 
+      order_approved_at IS NOT NULL 
+ GROUP BY 1
+ ORDER BY 2 DESC
+)
+
+SELECT 
+     customer_state, 
+     unique_customers,
+     ROUND( unique_customers / NULLIF(SUM(unique_customers) OVER(),0),2) AS customers_pct,
+     total_price, 
+     ROUND( total_price / NULLIF(SUM(total_price) OVER(),0),2) AS total_price_pct
+FROM customers_agg
+The majority of the customers were mainly located in the following states:
+
+São Paulo (SP), accounting for 42% of customers and 37% of revenue
+Rio de Janeiro (RJ) , accounting for 13% of customers and 13% of revenue
+Minas Gerais (MG) , accouting for 12% of customers and 12% of revenue
+Rio Grande do Sul (RS) , accouting for 5% of customers and 6% of revenue
+Paraná (PR) , accouting for 5% of customers and 5% of revenue
+According to IBGE, the top 5 states in terms of population were São Paulo (22.2%), Minas Gerais (10%), Rio de Janeiro (8%), Bahia (7.1%), and Paraná (5.7%). Despite MG being the 2nd in terms of population, it is in the 3rd position, responsible for a 12% share of revenue. Are the marketing campaigns for this state being effective? This also occurs in Bahia state. The growth marketing and logistics planning should consider these states for the following years.
+
+
+question 06: query output
+Question 07: Suppliers Location
+To focus on building and maintaining strong relationships with the key suppliers, the team needs to identify the states where the main customers are located.
+
+WITH orders_prices AS(
+
+ SELECT 
+  i.order_id,
+  SUM(i.price) AS price, 
+  SUM(i.freight_value) freight_value,
+  SUM(i.price + i.freight_value) AS total_price
+ FROM olist_order_items i
+ GROUP BY 1
+),
+
+customers_agg AS(
+
+ SELECT  
+  c.customer_state, 
+  COUNT(DISTINCT o.customer_id) AS unique_customers,
+  SUM(op.total_price) AS total_price
+ FROM olist_orders o 
+ LEFT JOIN olist_customers c ON o.customer_id = c.customer_id
+ LEFT JOIN orders_prices op ON o.order_id = op.order_id
+ WHERE 
+  order_approved_at IS NOT NULL 
+ GROUP BY 1
+ ORDER BY 2 DESC
+),
+
+customer_base AS(
+
+ SELECT 
+  customer_state, 
+  unique_customers,
+  ROUND( unique_customers / NULLIF(SUM(unique_customers) OVER(),0),2) AS customers_pct,
+  total_price, 
+  ROUND( total_price / NULLIF(SUM(total_price) OVER(),0),2) AS total_price_pct
+ FROM customers_agg
+),
+
+sellers AS(
+ 
+ SELECT  
+  s.seller_state,
+  COUNT(i.product_id) AS products
+ FROM olist_order_items i
+ LEFT JOIN olist_sellers s ON i.seller_id = s.seller_id
+ GROUP BY 1
+),
+
+sellers_database AS(
+
+SELECT 
+ seller_state, 
+ products, 
+ ROUND( products / NULLIF(SUM(products) OVER() ,0) ,2) AS sellers_state_pct
+FROM sellers
+ORDER BY 3 DESC
+)
+
+SELECT 
+ cb.customer_state, 
+ cb.unique_customers, 
+ cb.customers_pct,
+ cb.total_price, 
+ cb.total_price_pct, 
+ COALESCE(sb.products,0) AS products, 
+ COALESCE(sb.sellers_state_pct,0) AS sellers_state_pct
+FROM customer_base cb 
+LEFT JOIN sellers_database sb ON cb.customer_state = sb.seller_state
+ORDER BY sb.products DESC NULLS LAST
+To get an overall perspective between demand and supply, we combined the customer base and sellers data. In this summary, we noticed that the sellers are mainly located in 8 states, with São Paulo (SP) accounting for 71% of the sellers in this period. Some states, such as Tocantins (TO), Alagoas (AL), Amapá (AP), and Roraima (RR), did not have any sellers in this period.
+
